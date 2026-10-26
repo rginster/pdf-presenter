@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>PDF Presenter</title>
+<style>
+  :root {
+    --bg: #000;
+    --ui: rgba(28, 28, 30, 0.92);
+    --ui-border: rgba(255, 255, 255, 0.10);
+    --txt: #f5f5f7;
+    --txt-dim: #98989d;
+    --accent: #0a84ff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: var(--txt);
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  /* ---------- Stage ---------- */
+  #stage {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg);
+  }
+
+  #pageWrap {
+    position: relative;
+    box-shadow: 0 0 60px rgba(0,0,0,0.6);
+    line-height: 0;
+  }
+  #pdfCanvas, #inkCanvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+  }
+  #pdfCanvas { position: relative; background: #fff; }
+  #inkCanvas { touch-action: none; }
+
+  /* ---------- Black-out overlay ---------- */
+  #blackout {
+    position: fixed; inset: 0; background: #000;
+    opacity: 0; pointer-events: none; transition: opacity .25s ease; z-index: 40;
+  }
+  #blackout.on { opacity: 1; pointer-events: auto; }
+
+  /* ---------- Toolbar ---------- */
+  #toolbar {
+    position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom));
+    transform: translateX(-50%) translateY(0);
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px; z-index: 50;
+    background: var(--ui);
+    border: 1px solid var(--ui-border);
+    border-radius: 18px;
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    transition: opacity .35s ease, transform .35s ease;
+  }
+  #toolbar.hidden { opacity: 0; transform: translateX(-50%) translateY(140%); pointer-events: none; }
+
+  .btn {
+    appearance: none; border: none; background: transparent;
+    color: var(--txt); width: 46px; height: 46px;
+    border-radius: 13px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background .15s ease, color .15s ease;
+    flex: none;
+  }
+  .btn:hover { background: rgba(255,255,255,0.08); }
+  .btn:active { background: rgba(255,255,255,0.16); }
+  .btn.active { background: var(--accent); color: #fff; }
+  .btn svg { width: 23px; height: 23px; display: block; }
+  .btn.disabled { opacity: .3; pointer-events: none; }
+
+  .sep { width: 1px; height: 28px; background: var(--ui-border); margin: 0 4px; flex: none; }
+
+  #pageBox {
+    display: flex; align-items: center; gap: 2px;
+    padding: 0 6px; min-width: 84px; justify-content: center;
+    font-variant-numeric: tabular-nums; font-size: 15px; color: var(--txt-dim);
+    white-space: nowrap;
+  }
+  #pageBox b { color: var(--txt); font-weight: 600; }
+
+  /* color swatches */
+  .swatch {
+    width: 30px; height: 30px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.25); cursor: pointer; flex: none;
+    transition: transform .12s ease, border-color .12s ease;
+  }
+  .swatch.active { border-color: #fff; transform: scale(1.12); }
+  #palette { display: flex; align-items: center; gap: 8px; padding: 0 6px; }
+
+  /* ---------- Start screen ---------- */
+  #start {
+    position: fixed; inset: 0; z-index: 60;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 26px; background: radial-gradient(120% 120% at 50% 30%, #1c1c1e 0%, #000 70%);
+    text-align: center; padding: 24px;
+  }
+  #start.gone { display: none; }
+  #start h1 { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
+  #start p { color: var(--txt-dim); font-size: 16px; max-width: 460px; line-height: 1.5; }
+  #openBig {
+    appearance: none; border: none; cursor: pointer;
+    background: var(--accent); color: #fff;
+    font-size: 18px; font-weight: 600;
+    padding: 16px 34px; border-radius: 16px;
+    display: inline-flex; align-items: center; gap: 12px;
+    transition: transform .12s ease, filter .12s ease;
+  }
+  #openBig:active { transform: scale(0.97); filter: brightness(1.1); }
+  #openBig svg { width: 24px; height: 24px; }
+  .hint { color: var(--txt-dim); font-size: 13px; line-height: 1.7; }
+  .hint kbd {
+    display: inline-block; padding: 1px 7px; margin: 0 1px;
+    background: rgba(255,255,255,0.08); border: 1px solid var(--ui-border);
+    border-radius: 6px; font-family: inherit; font-size: 12px; color: var(--txt);
+  }
+
+  /* ---------- Page flash indicator ---------- */
+  #flash {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    background: var(--ui); border: 1px solid var(--ui-border);
+    color: var(--txt); padding: 14px 26px; border-radius: 16px;
+    font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    opacity: 0; pointer-events: none; transition: opacity .25s ease; z-index: 45;
+  }
+  #flash.show { opacity: 1; }
+
+  input[type=file] { display: none; }
+
+  /* loading spinner */
+  #spin {
+    position: fixed; top: 50%; left: 50%; width: 46px; height: 46px;
+    margin: -23px 0 0 -23px; border: 3px solid rgba(255,255,255,0.15);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: rot .8s linear infinite; z-index: 55; display: none;
+  }
+  #spin.on { display: block; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <div id="pageWrap">
+    <canvas id="pdfCanvas"></canvas>
+    <canvas id="inkCanvas"></canvas>
+  </div>
+</div>
+
+<div id="blackout"></div>
+<div id="spin"></div>
+
+<!-- Toolbar -->
+<div id="toolbar" class="hidden">
+  <button class="btn" id="btnOpen" title="PDF öffnen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M5 21V5a2 2 0 0 1 2-2h7l5 5v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M12 11v6M9 14h6"/></svg>
+  </button>
+
+  <div class="sep"></div>
+
+  <button class="btn" id="btnPrev" title="Zurück">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+  </button>
+  <div id="pageBox"><b id="curPage">–</b><span>/</span><span id="totPage">–</span></div>
+  <button class="btn" id="btnNext" title="Weiter">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+  </button>
+
+  <div class="sep"></div>
+
+  <button class="btn" id="btnPen" title="Stift">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3 0z" transform="translate(-2 -1)"/><path d="M18 13l-1.5-1.5"/><path d="M2 22l4-1 11-11-3-3L3 18z"/></svg>
+  </button>
+  <button class="btn" id="btnErase" title="Radierer">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 21h10"/><path d="M5 13l6-6 7 7-4 4H9z"/><path d="M11 7l7 7"/></svg>
+  </button>
+
+  <div id="palette">
+    <span class="swatch active" data-color="#ff3b30" style="background:#ff3b30"></span>
+    <span class="swatch" data-color="#0a84ff" style="background:#0a84ff"></span>
+    <span class="swatch" data-color="#30d158" style="background:#30d158"></span>
+    <span class="swatch" data-color="#ffd60a" style="background:#ffd60a"></span>
+    <span class="swatch" data-color="#1c1c1e" style="background:#1c1c1e; border-color:rgba(255,255,255,.4)"></span>
+  </div>
+
+  <button class="btn" id="btnClear" title="Seite löschen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+  </button>
+
+  <div class="sep"></div>
+
+  <button class="btn" id="btnBlack" title="Schwarzer Bildschirm">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg>
+  </button>
+  <button class="btn" id="btnFull" title="Vollbild">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M16 21h3a2 2 0 0 0 2-2v-3M8 21H5a2 2 0 0 1-2-2v-3"/></svg>
+  </button>
+</div>
+
+<!-- Start screen -->
+<div id="start">
+  <h1>PDF Presenter</h1>
+  <p>Präsentiere PDFs wie eine Diashow. Navigiere mit jedem Presenter, schreibe mit dem Apple Pencil – alles in einer Datei, komplett offline.</p>
+  <button id="openBig">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V5a2 2 0 0 1 2-2h7l5 5v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/><path d="M14 3v4a1 1 0 0 0 1 1h4"/></svg>
+    PDF auswählen
+  </button>
+  <div class="hint">
+    <kbd>→</kbd><kbd>↓</kbd><kbd>Bild ab</kbd><kbd>Leertaste</kbd> weiter &nbsp;·&nbsp;
+    <kbd>←</kbd><kbd>↑</kbd><kbd>Bild auf</kbd> zurück<br>
+    <kbd>B</kbd> schwarz &nbsp;·&nbsp; <kbd>F</kbd> Vollbild &nbsp;·&nbsp; <kbd>Esc</kbd> Menü
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="application/pdf,.pdf">
+
+<script type="module">
+import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
+
+// ---------- State ----------
+const state = {
+  pdf: null,
+  page: 1,
+  total: 0,
+  scale: 1,
+  tool: 'pen',          // 'pen' | 'erase'
+  color: '#ff3b30',
+  penWidth: 3,
+  eraseWidth: 28,
+  annotations: {},      // pageNumber -> offscreen <canvas> with the ink layer
+  rendering: false,
+  pendingPage: null,
+};
+
+// ---------- DOM ----------
+const $ = id => document.getElementById(id);
+const pdfCanvas = $('pdfCanvas'), inkCanvas = $('inkCanvas');
+const pctx = pdfCanvas.getContext('2d');
+const ictx = inkCanvas.getContext('2d');
+const pageWrap = $('pageWrap');
+const toolbar = $('toolbar');
+
+// ---------- File loading ----------
+$('fileInput').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) loadFile(f);
+  e.target.value = '';
+});
+$('btnOpen').addEventListener('click', () => $('fileInput').click());
+$('openBig').addEventListener('click', () => $('fileInput').click());
+
+async function loadFile(file) {
+  $('spin').classList.add('on');
+  try {
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    state.pdf = pdf;
+    state.total = pdf.numPages;
+    state.page = 1;
+    state.annotations = {};
+    $('totPage').textContent = state.total;
+    $('start').classList.add('gone');
+    toolbar.classList.remove('hidden');
+    await renderPage(1);
+    showToolbar();
+    hideTimer = setTimeout(hideToolbar, 4000);  // einmalig nach dem Laden ausblenden
+    enterFullscreen();
+  } catch (err) {
+    alert('PDF konnte nicht geladen werden:\n' + err.message);
+  } finally {
+    $('spin').classList.remove('on');
+  }
+}
+
+// ---------- Rendering ----------
+async function renderPage(num) {
+  if (!state.pdf) return;
+  if (state.rendering) { state.pendingPage = num; return; }
+  state.rendering = true;
+
+  const page = await state.pdf.getPage(num);
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+
+  // Fit page into the viewport
+  const vp1 = page.getViewport({ scale: 1 });
+  const margin = 0;
+  const availW = window.innerWidth - margin;
+  const availH = window.innerHeight - margin;
+  const fit = Math.min(availW / vp1.width, availH / vp1.height);
+  const cssW = vp1.width * fit;
+  const cssH = vp1.height * fit;
+  const viewport = page.getViewport({ scale: fit * dpr });
+
+  // PDF canvas (device pixels) + CSS size
+  pdfCanvas.width = Math.round(viewport.width);
+  pdfCanvas.height = Math.round(viewport.height);
+  pageWrap.style.width = cssW + 'px';
+  pageWrap.style.height = cssH + 'px';
+
+  await page.render({ canvasContext: pctx, viewport }).promise;
+
+  // Ink canvas matches device pixels of the PDF canvas
+  inkCanvas.width = pdfCanvas.width;
+  inkCanvas.height = pdfCanvas.height;
+  restoreInk(num);
+
+  state.page = num;
+  $('curPage').textContent = num;
+  updateNavButtons();
+
+  state.rendering = false;
+  if (state.pendingPage !== null && state.pendingPage !== num) {
+    const p = state.pendingPage; state.pendingPage = null; renderPage(p);
+  } else {
+    state.pendingPage = null;
+  }
+}
+
+function restoreInk(num) {
+  ictx.clearRect(0, 0, inkCanvas.width, inkCanvas.height);
+  const off = state.annotations[num];
+  if (off) ictx.drawImage(off, 0, 0, inkCanvas.width, inkCanvas.height);
+}
+
+// Save by copying the ink layer into an offscreen canvas (fast GPU drawImage,
+// NO synchronous PNG encoding). Only runs when leaving a page, never per stroke.
+function saveInk() {
+  if (!pageDirty) return;
+  let off = state.annotations[state.page];
+  if (!off) { off = document.createElement('canvas'); state.annotations[state.page] = off; }
+  if (off.width !== inkCanvas.width || off.height !== inkCanvas.height) {
+    off.width = inkCanvas.width; off.height = inkCanvas.height;
+  }
+  const octx = off.getContext('2d');
+  octx.clearRect(0, 0, off.width, off.height);
+  octx.drawImage(inkCanvas, 0, 0);
+  pageDirty = false;
+}
+
+// ---------- Navigation ----------
+function go(delta) { goTo(state.page + delta); }
+function goTo(num) {
+  if (!state.pdf) return;
+  num = Math.max(1, Math.min(state.total, num));
+  if (num === state.page) return;
+  saveInk();
+  renderPage(num);
+}
+function updateNavButtons() {
+  $('btnPrev').classList.toggle('disabled', state.page <= 1);
+  $('btnNext').classList.toggle('disabled', state.page >= state.total);
+}
+$('btnPrev').addEventListener('click', () => go(-1));
+$('btnNext').addEventListener('click', () => go(1));
+
+// ---------- Keyboard (maximale Presenter-Kompatibilität) ----------
+const NEXT_KEYS = new Set([
+  'ArrowRight','ArrowDown','PageDown','Space',' ','Enter','MediaPlayPause','AudioVolumeUp','N','n'
+]);
+const PREV_KEYS = new Set([
+  'ArrowLeft','ArrowUp','PageUp','Backspace','AudioVolumeDown','P','p'
+]);
+
+window.addEventListener('keydown', e => {
+  if (!state.pdf) return;
+  const k = e.key;
+
+  if (k === 'Escape') { toggleToolbar(); return; }
+  if (k === 'b' || k === 'B' || k === '.') { e.preventDefault(); toggleBlack(); return; }
+  if (k === 'f' || k === 'F') { e.preventDefault(); toggleFullscreen(); return; }
+  if (k === 'Home') { e.preventDefault(); goTo(1); return; }
+  if (k === 'End') { e.preventDefault(); goTo(state.total); return; }
+
+  if (NEXT_KEYS.has(k)) { e.preventDefault(); if(isBlack()) toggleBlack(); else go(1); return; }
+  if (PREV_KEYS.has(k)) { e.preventDefault(); if(isBlack()) toggleBlack(); else go(-1); return; }
+}, { passive: false });
+
+// ---------- Drawing core ----------
+// Auf dem iPad zeichnet der Apple Pencil über Touch-Events (touchType === 'stylus').
+// Das ist deutlich zuverlässiger als Pointer-Events. Finger -> Wischen/Tippen.
+let drawing = false, lastX = 0, lastY = 0, dirty = false, pageDirty = false;
+
+function ptFromClient(clientX, clientY) {
+  const r = inkCanvas.getBoundingClientRect();
+  return {
+    x: (clientX - r.left) * (inkCanvas.width / r.width),
+    y: (clientY - r.top) * (inkCanvas.height / r.height)
+  };
+}
+function beginDraw(clientX, clientY, pressure) {
+  drawing = true; dirty = false;
+  const p = ptFromClient(clientX, clientY);
+  lastX = p.x; lastY = p.y;
+  strokeDab(p.x, p.y, pressure);
+}
+function extendDraw(clientX, clientY, pressure) {
+  if (!drawing) return;
+  const p = ptFromClient(clientX, clientY);
+  strokeLine(lastX, lastY, p.x, p.y, pressure);
+  lastX = p.x; lastY = p.y;
+}
+function finishDraw() { drawing = false; }
+
+// ---------- Touch: Stift zeichnet, Finger wischt ----------
+let swipeX = 0, swipeY = 0, swipeMoved = false, swipeActive = false;
+
+function findStylus(list) {
+  for (const t of list) if (t.touchType === 'stylus') return t;
+  return null;
+}
+
+inkCanvas.addEventListener('touchstart', e => {
+  const s = findStylus(e.touches);
+  if (s) {                                   // Apple Pencil -> zeichnen
+    e.preventDefault();
+    swipeActive = false;
+    beginDraw(s.clientX, s.clientY, s.force);
+    return;
+  }
+  if (e.touches.length === 1) {              // ein Finger -> evtl. wischen
+    swipeActive = true; swipeMoved = false;
+    swipeX = e.touches[0].clientX; swipeY = e.touches[0].clientY;
+  } else {
+    swipeActive = false;
+  }
+}, { passive: false });
+
+inkCanvas.addEventListener('touchmove', e => {
+  const s = findStylus(e.touches);
+  if (drawing && s) {
+    e.preventDefault();
+    extendDraw(s.clientX, s.clientY, s.force);
+    return;
+  }
+  if (swipeActive && e.touches.length === 1) {
+    if (Math.abs(e.touches[0].clientX - swipeX) > 10 ||
+        Math.abs(e.touches[0].clientY - swipeY) > 10) swipeMoved = true;
+  }
+}, { passive: false });
+
+function touchEnd(e) {
+  if (drawing && !findStylus(e.touches)) {   // Stift abgehoben -> Strich beenden
+    finishDraw();
+    return;
+  }
+  if (swipeActive && swipeMoved) {
+    const t = e.changedTouches[0];
+    const dx = t.clientX - swipeX, dy = t.clientY - swipeY;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) {
+      if (isBlack()) toggleBlack(); else go(dx < 0 ? 1 : -1);
+    }
+  }
+  swipeActive = false;
+}
+inkCanvas.addEventListener('touchend', touchEnd, { passive: false });
+inkCanvas.addEventListener('touchcancel', touchEnd, { passive: false });
+
+// ---------- Maus: nur am Desktop (zum Testen), auf Touch-Geräten deaktiviert ----------
+const HAS_TOUCH = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (!HAS_TOUCH) {
+  inkCanvas.addEventListener('mousedown', e => beginDraw(e.clientX, e.clientY, 0.5));
+  window.addEventListener('mousemove', e => { if (drawing) extendDraw(e.clientX, e.clientY, 0.5); });
+  window.addEventListener('mouseup', finishDraw);
+}
+
+function configCtx(pressure) {
+  ictx.lineCap = 'round';
+  ictx.lineJoin = 'round';
+  if (state.tool === 'erase') {
+    ictx.globalCompositeOperation = 'destination-out';
+    ictx.strokeStyle = 'rgba(0,0,0,1)';
+    ictx.fillStyle = 'rgba(0,0,0,1)';
+    ictx.lineWidth = state.eraseWidth * (inkCanvas.width / pageWrap.clientWidth);
+  } else {
+    ictx.globalCompositeOperation = 'source-over';
+    ictx.strokeStyle = state.color;
+    ictx.fillStyle = state.color;
+    const base = state.penWidth * (inkCanvas.width / pageWrap.clientWidth);
+    const pr = pressure && pressure > 0 ? (0.4 + pressure * 1.2) : 1;
+    ictx.lineWidth = base * pr;
+  }
+}
+function strokeDab(x, y, pressure) {
+  configCtx(pressure);
+  ictx.beginPath();
+  ictx.arc(x, y, ictx.lineWidth / 2, 0, Math.PI * 2);
+  ictx.fill();
+  dirty = true; pageDirty = true;
+}
+function strokeLine(x0, y0, x1, y1, pressure) {
+  configCtx(pressure);
+  ictx.beginPath();
+  ictx.moveTo(x0, y0);
+  ictx.lineTo(x1, y1);
+  ictx.stroke();
+  dirty = true; pageDirty = true;
+}
+
+// ---------- Tools UI ----------
+$('btnPen').addEventListener('click', () => setTool('pen'));
+$('btnErase').addEventListener('click', () => setTool('erase'));
+function setTool(t) {
+  state.tool = t;
+  $('btnPen').classList.toggle('active', t === 'pen');
+  $('btnErase').classList.toggle('active', t === 'erase');
+}
+setTool('pen');
+
+document.querySelectorAll('.swatch').forEach(s => {
+  s.addEventListener('click', () => {
+    document.querySelectorAll('.swatch').forEach(x => x.classList.remove('active'));
+    s.classList.add('active');
+    state.color = s.dataset.color;
+    setTool('pen');
+  });
+});
+
+$('btnClear').addEventListener('click', () => {
+  ictx.clearRect(0, 0, inkCanvas.width, inkCanvas.height);
+  delete state.annotations[state.page];
+  pageDirty = false;
+});
+
+// ---------- Black screen ----------
+function isBlack() { return $('blackout').classList.contains('on'); }
+function toggleBlack() { $('blackout').classList.toggle('on'); }
+$('btnBlack').addEventListener('click', toggleBlack);
+$('blackout').addEventListener('click', () => toggleBlack());
+
+// ---------- Fullscreen ----------
+function enterFullscreen() {
+  const el = document.documentElement;
+  if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+}
+function toggleFullscreen() {
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  } else enterFullscreen();
+}
+$('btnFull').addEventListener('click', toggleFullscreen);
+
+// ---------- Toolbar (rein manueller Toggle – kommt beim Blättern NICHT von selbst hoch) ----------
+let hideTimer;
+function showToolbar() { clearTimeout(hideTimer); toolbar.classList.remove('hidden'); }
+function hideToolbar() { clearTimeout(hideTimer); toolbar.classList.add('hidden'); }
+function toggleToolbar() { toolbar.classList.contains('hidden') ? showToolbar() : hideToolbar(); }
+
+// Reveal toolbar on finger tap (not pencil) and on mouse move
+let tapStart = 0;
+document.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'pen') return;
+  tapStart = e.timeStamp;
+}, true);
+document.addEventListener('pointerup', e => {
+  if (e.pointerType === 'pen') return;
+  // a quick tap toggles the toolbar; ignore taps on the toolbar itself
+  if (e.timeStamp - tapStart < 250 && !e.target.closest('#toolbar') && !e.target.closest('#start')) {
+    toggleToolbar();
+  }
+}, true);
+// Tippen auf die Toolbar selbst soll sie nicht schließen
+toolbar.addEventListener('pointerup', e => e.stopPropagation());
+
+// ---------- Resize ----------
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { if (state.pdf) { saveInk(); renderPage(state.page); } }, 150);
+});
+
+// Prevent context menu / selection callouts during presentation
+window.addEventListener('contextmenu', e => { if (state.pdf) e.preventDefault(); });
+document.addEventListener('gesturestart', e => e.preventDefault());
+</script>
+</body>
+</html>
